@@ -1,0 +1,45 @@
+Usando a impressora bematech MP4200TH no ubuntu oneric(11.10)
+============================================================
+
+- Verifique se a impressora esta ligada e corretamente conectada ao pc (USB)
+    - Voce pode ver se a impressora foi detectada pelo sistema usando o commando:
+        ~# lsusb -d 0b1b:0003
+        - O resultado tem que ser algo como:
+             Bus 002 Device 007: ID 0b1b:0003
+
+- Remove o modulo que e carregado automatico pelo kernel:
+    - Para remover temporariamente use:  ~# sudo rmmode cdc_acm
+    - Para removed definitivamente:
+        - Edite o arquivo: /etc/modprobe.d/blacklist.conf
+        - Addicione ao final do arquivo a linha: blacklist cdc_acm
+
+- Atualize as permissoes do device:
+    - Para mudar as permissoes temporariamente use:
+        ~# sudo chmod 777 /dev/bus/usb/[BusID]/[DeviceID]
+        - BusID e DeviceID vc deve substituir pelo correspondente no seu computador, utilize o commando:
+            ~# lsusb -d 0b1b:0003
+    - Para atualizar as permissoes definitivamente:
+        - Crie o aquivo: /etc/udev/rules.d/99-bematech.rules
+        - Dentro do arquivo coloque a seguinte linha:
+            SUBSYSTEM=="usb", ACTION=="add", SYSFS{idVendor}=="0b1b", SYSFS{idProduct}=="0003", MODE="0666"
+        - Reinicie udev:
+            ~# sudo /etc/init.d/udev restart
+        - Voce precisa desligar e ligar a impressora novamente pare que as novas permissoes sejam applicada;
+
+
+Compilando o programa de test:
+=============================
+
+* Dependencias: libusb-dev libqt4-dev cmake
+    - Para instalar use o commando:
+        ~# sudo apt-get install libusb-dev libqt4-dev cmake
+
+Para compilar o programa de teste execute os seguintes commandos dentro do diretorio com o codigo do programa:
+
+    ~# mkdir build
+    ~# cd build
+    ~# cmake ../
+    ~# make
+
+
+
