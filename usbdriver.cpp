@@ -20,14 +20,22 @@
 #include "usbdriver.h"
 
 #include <QDebug>
-#include <unistd.h>
+
+#ifdef Q_WS_WIN
+	#include <windows.h>
+	#define sleep(x) Sleep(x*1000)
+#else
+	#include <unistd.h>
+#endif
+
+#include <errno.h>
 
 #define BEMATECH_ID_VENDOR  0x0B1B
 
 // Device endpoint(s)
 #define EP_OUT  0x01
 #define EP_IN   0x82
-#define DEVICE_BUFFER_SIZE 64
+#define DEVICE_BUFFER_SIZE 1024
 
 static bool initlialized = false;
 
@@ -50,63 +58,140 @@ BematechDrv::~BematechDrv()
 
 bool BematechDrv::open()
 {
-    struct usb_bus *bus;
-    struct usb_device *dev;
-
     if (m_dev)
         return true;
 
+    usb_init(); /* initialize the library */
     usb_find_busses(); /* find all busses */
     usb_find_devices(); /* find all connected devices */
 
+    struct usb_bus  *bus;
+    struct usb_device *dev;
+    struct usb_device *best_dev = 0;
+
+    int best_conf = -1;
+    int conf = -1;
+    struct usb_config_descriptor *confptr;
+
+    int best_iface = -1;
+    int iface = -1;
+    struct usb_interface *ifaceptr;
+
+    int best_altset = -1;
+    int altset = -1;
+    struct usb_interface_descriptor *altptr;
+
+    int best_write_ep = -1;
+    int best_read_ep = -1;
+    int endp;
+    struct usb_endpoint_descriptor *endpptr;
+
+    //Difent class for diferent model.
+    int interfaceClas = m_product_id == 1 ? 255 : USB_CLASS_DATA;
+
+    int protocol = -1;
+
     for (bus = usb_get_busses(); bus; bus = bus->next) {
         for (dev = bus->devices; dev; dev = dev->next) {
-            if (dev->descriptor.idVendor == BEMATECH_ID_VENDOR &&
-                dev->descriptor.idProduct == m_product_id)
-            {
-                m_dev = usb_open(dev);
-                int configId = -1;
-                int interfaceId = -1;
-                int altInterfaceId = -1;
+            if (dev->descriptor.idVendor != BEMATECH_ID_VENDOR
+                || dev->descriptor.idProduct != m_product_id)
+                continue;
 
-                for(int i=0; i < dev->descriptor.bNumConfigurations; i++) {
-                    struct usb_config_descriptor config = dev->config[i];
-                    for(int y=0; y < config.bNumInterfaces; y++) {
-                        for(int a=0; a < config.interface[y].num_altsetting; a++) {
-                            if (config.interface[y].altsetting[a].bDescriptorType == 4) {
-                                configId = config.bConfigurationValue;
-                                interfaceId = config.interface[y].altsetting[a].bInterfaceNumber;
-                                altInterfaceId = config.interface[y].altsetting[a].bAlternateSetting;
+            for(conf = 0, confptr = dev->config;
+                conf < dev->descriptor.bNumConfigurations;
+                conf++, confptr++) {
+                for (iface = 0, ifaceptr = confptr->interface;
+                     iface < confptr->bNumInterfaces;
+                     iface++, ifaceptr++) {
+                    for (altset = 0, altptr = ifaceptr->altsetting;
+                         altset < ifaceptr->num_altsetting;
+                         altset++, altptr++) {
+
+                        if (altptr->bInterfaceClass != interfaceClas)
+                            continue;
+
+                        int read_endp = -1;
+                        int write_endp = -1;
+
+                        for (endp = 0, endpptr = altptr->endpoint;
+                            endp < altptr->bNumEndpoints;
+                            endp++, endpptr++) {
+
+                            if ((endpptr->bmAttributes & USB_ENDPOINT_TYPE_MASK) == USB_ENDPOINT_TYPE_BULK) {
+                                if (endpptr->bEndpointAddress & USB_ENDPOINT_DIR_MASK) {
+                                    read_endp = endp;
+                                } else {
+                                    write_endp = endp;
+                                }
+                            }
+
+                            // Save best match
+                            if (write_endp >= 0) {
+                                protocol = altptr->bInterfaceProtocol;
+                                best_altset = altset;
+                                best_write_ep = write_endp;
+                                best_read_ep = read_endp;
                             }
                         }
-                    }
-                }
-                QByteArray functionError;
-                if (usb_set_configuration(m_dev, configId) == 0) {
-                    if (usb_claim_interface(m_dev, interfaceId) == 0) {
-                        if (usb_set_altinterface(m_dev, altInterfaceId) == 0) {
-                            m_interfaceID = interfaceId;
-                            if (initialize()) {
-                                return true;
-                            }
-                        } else {
-                            functionError = "usb_set_altinterface";
-                        }
-                    } else {
-                        functionError = "usb_claim_interface";
-                    }
-                } else {
-                   functionError = "usb_set_configuration";
-                }
 
-                if (!functionError.isEmpty()) {
-                    qWarning() << functionError << "ERROR:" << usb_strerror();
+                        if (best_write_ep > -1) {
+                            best_dev = dev;
+                            best_conf = conf;
+                            best_iface = iface;
+                            break;
+                        }
+                    }
+                    if (best_dev) break;
                 }
+                if (best_dev) break;
+            }
+            if (best_dev) break;
+        }
+        if (best_dev) break;
+    }
+
+    if (best_dev) {
+        qDebug() << "Device:    " << best_dev << "\n"
+                 << "Conf:      " << best_conf << "\n"
+                 << "Iface:     " << best_iface << "\n"
+                 << "Altset:    " << best_altset << "\n"
+                 << "Write EP:  " << best_write_ep << "\n"
+                 << "Read EP:   " << best_read_ep;
+
+        m_dev = usb_open(best_dev);
+        if (!m_dev) {
+            qWarning() << "Fail to open device";
+            return false;
+        }
+
+        if (usb_set_configuration(m_dev, best_dev->config[best_conf].bConfigurationValue) != 0) {
+            qWarning() << "Fail to set configuration";
+            return false;
+        }
+
+        int number = best_dev->config[best_conf].interface[best_iface].altsetting[best_altset].bInterfaceNumber;
+        while(usb_claim_interface(m_dev, number)) {
+            if (errno != EBUSY) {
+                qWarning() << "Fail to clain interface";
+                return false;
             }
         }
+
+        number =  best_dev->config[best_conf].interface[best_iface].altsetting[best_altset].bAlternateSetting;
+        while (usb_set_altinterface(m_dev, number)) {
+            if (errno != EBUSY) {
+                qWarning() << "Fail to set alternate interface";
+                return false;
+            }
+        }
+
+        m_interfaceID = best_iface;
+        m_endPointWrite = best_dev->config[best_conf].interface[best_iface].altsetting[best_altset].endpoint[best_write_ep].bEndpointAddress;
+        m_endPointRead = best_dev->config[best_conf].interface[best_iface].altsetting[best_altset].endpoint[best_read_ep].bEndpointAddress;
+
+        return initialize();
     }
-    m_dev = 0;
-    qWarning() << "IMPRESSORA BEMATECH NOT FOUND";
+    qWarning() << "PRINTER NOT FOUND";
     return false;
 }
 
@@ -118,8 +203,10 @@ void BematechDrv::close()
     if (m_dev == 0)
         return;
 
+
     sendPostCommand();
-    sendCommand("\x1D\xf8\x46"); //reset
+    if (m_product_id == 3)
+        sendCommand("\x1D\xf8\x46"); //reset
 
     if (usb_clear_halt(m_dev, m_endPointRead) < 0) {
         qWarning() << "Fail to clear end-point";
@@ -143,7 +230,8 @@ void BematechDrv::close()
 bool BematechDrv::reset()
 {
     close();
-    sleep(7); // wait for print reset
+    if (m_product_id == 3)
+        sleep(7); // wait for print reset
     return open();
 }
 
@@ -151,9 +239,19 @@ bool BematechDrv::initialize()
 {
     int ret = 0;
 
-    ret = sendControlMessage(0x22, 0x0003, QByteArray("", 0));
-    if (ret < 0)
-        return false;
+    if (m_product_id == 1) {
+        ret = sendControlMessage(0x0000, 0xFFFF, QByteArray("", 0));
+        if (ret < 0)
+            return false;
+
+        ret = sendControlMessage(0x01, 0x0007, QByteArray("", 0));
+        if (ret < 0)
+            return false;
+    } else if (m_product_id == 3) {
+        ret = sendControlMessage(0x22, 0x0003, QByteArray("", 0));
+        if (ret < 0)
+            return false;
+    }
 
     return sendPreCommand();
 }
@@ -193,7 +291,7 @@ bool BematechDrv::sendCommand(const QByteArray &data)
     QByteArray buffer = data;
     while(buffer.size() > 0 ) {
         int size = buffer.size() > DEVICE_BUFFER_SIZE ? DEVICE_BUFFER_SIZE : buffer.size();
-        int ret = usb_bulk_write(m_dev, EP_OUT, (char*)buffer.data(), size, 5000);
+        int ret = usb_bulk_write(m_dev, m_endPointWrite, (char*)buffer.data(), size, 5000);
         if (ret < 0) {
             error = true;
             qWarning() << "error writing:" << usb_strerror();
@@ -204,7 +302,7 @@ bool BematechDrv::sendCommand(const QByteArray &data)
         }
     }
 #else
-    int ret = usb_bulk_write(m_dev, EP_OUT, (char*)data.data(), data.size(), 5000);
+    int ret = usb_bulk_write(m_dev, m_endPointWrite, (char*)data.data(), data.size(), 5000);
     if (ret < 0)
         error = true;
 #endif

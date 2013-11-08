@@ -30,6 +30,7 @@ class BematechDrv
 public:
     BematechDrv(int product_id);
     ~BematechDrv();
+    bool isOpen() const;
     bool open();
     void close();
     bool reset();
